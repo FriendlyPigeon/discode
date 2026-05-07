@@ -1,5 +1,5 @@
-import discord_scriptable_bot.{type Position}
 import discord_scriptable_bot/ast
+import discord_scriptable_bot/lexer.{type Position}
 import discord_scriptable_bot/token.{type Token}
 import gleam/list
 import gleam/option.{None, Some}
@@ -9,28 +9,12 @@ pub type ParserError {
   UnexpectedToken(token: Token, position: Position)
 }
 
-pub fn parse_program(
-  tokens: List(#(Token, Position)),
-) -> Result(ast.Program, ParserError) {
-  case tokens {
-    [] -> Error(UnexpectedEndOfInput)
-    all_tokens -> {
-      case parse_statements(all_tokens, []) {
-        Ok(statements) -> {
-          Ok(ast.Program(statements))
-        }
-        Error(error) -> Error(error)
-      }
-    }
-  }
-}
-
 // fn syntax_error(error: String, error_type: Error) -> ParserError {
 //   io.print_error(error)
 //   error_type
 // }
 
-fn parse_statements(
+pub fn parse_statements(
   tokens: List(#(Token, Position)),
   statements: List(ast.Statement),
 ) -> Result(List(ast.Statement), ParserError) {

@@ -1,4 +1,5 @@
-import discord_scriptable_bot.{Position}
+import discord_scriptable_bot
+import discord_scriptable_bot/lexer.{Position}
 import discord_scriptable_bot/token
 import gleam/time/calendar
 import gleeunit
