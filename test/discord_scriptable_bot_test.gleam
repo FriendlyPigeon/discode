@@ -1,6 +1,8 @@
 import discord_scriptable_bot
+import discord_scriptable_bot/ast
 import discord_scriptable_bot/lexer.{Position}
 import discord_scriptable_bot/token
+import gleam/option.{None}
 import gleam/time/calendar
 import gleeunit
 import gleeunit/should
@@ -10,7 +12,7 @@ pub fn main() -> Nil {
 }
 
 pub fn can_lex_basic_1_test() {
-  "when user the_friendly_pigeon post message, post message \"hello world\""
+  "when user the_friendly_pigeon post message, post message \"hello world\"."
   |> discord_scriptable_bot.new()
   |> discord_scriptable_bot.discard_whitespace()
   |> discord_scriptable_bot.lex()
@@ -24,7 +26,37 @@ pub fn can_lex_basic_1_test() {
     #(token.Post, Position(44)),
     #(token.Message, Position(49)),
     #(token.String("hello world"), Position(57)),
+    #(token.Period, Position(70)),
   ])
+}
+
+pub fn can_parse_basic_1_test() {
+  [
+    #(token.When, Position(0)),
+    #(token.User, Position(5)),
+    #(token.Name("the_friendly_pigeon"), Position(10)),
+    #(token.Post, Position(30)),
+    #(token.Message, Position(35)),
+    #(token.Comma, Position(42)),
+    #(token.Post, Position(44)),
+    #(token.Message, Position(49)),
+    #(token.String("hello world"), Position(57)),
+    #(token.Period, Position(70)),
+  ]
+  |> discord_scriptable_bot.parse_program()
+  |> should.equal(
+    Ok(
+      ast.Program([
+        ast.Expression(
+          ast.When(ast.UserEvent(
+            ast.User("the_friendly_pigeon"),
+            ast.Message(None),
+            ast.Post("hello world"),
+          )),
+        ),
+      ]),
+    ),
+  )
 }
 
 pub fn can_lex_unterminated_string_test() {
@@ -46,7 +78,7 @@ pub fn can_lex_unterminated_string_test() {
 }
 
 pub fn can_lex_string_variable_test() {
-  "catch_phrase is \"a catch phrase\".\nwhen user any post message containing catch_phrase, post message \"that is your catch phrase\""
+  "catch_phrase is \"a catch phrase\".\nwhen user any post message containing catch_phrase, post message \"that is your catch phrase\"."
   |> discord_scriptable_bot.new()
   |> discord_scriptable_bot.discard_whitespace()
   |> discord_scriptable_bot.lex()
@@ -66,6 +98,7 @@ pub fn can_lex_string_variable_test() {
     #(token.Post, Position(86)),
     #(token.Message, Position(91)),
     #(token.String("that is your catch phrase"), Position(99)),
+    #(token.Period, Position(126)),
   ])
 }
 

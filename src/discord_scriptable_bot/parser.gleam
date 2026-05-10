@@ -18,18 +18,19 @@ pub fn parse_statements(
   tokens: List(#(Token, Position)),
   statements: List(ast.Statement),
 ) -> Result(List(ast.Statement), ParserError) {
-  case list.length(statements), statements {
-    0, [] -> Error(UnexpectedEndOfInput)
+  case list.length(tokens), statements {
+    0, [] -> {
+      Error(UnexpectedEndOfInput)
+    }
     0, all_statements -> Ok(all_statements)
     _token_count, all_statements -> {
       case parse_statement(tokens) {
-        Ok(statement) -> {
-          parse_statements(
-            list.drop(tokens, 4),
-            list.append(all_statements, [statement]),
-          )
+        Ok(#(new_tokens, statement)) -> {
+          parse_statements(new_tokens, list.append(all_statements, [statement]))
         }
-        Error(error) -> Error(error)
+        Error(error) -> {
+          Error(error)
+        }
       }
     }
   }
@@ -37,27 +38,35 @@ pub fn parse_statements(
 
 fn parse_statement(
   tokens: List(#(Token, Position)),
-) -> Result(ast.Statement, ParserError) {
+) -> Result(#(List(#(Token, Position)), ast.Statement), ParserError) {
   case tokens {
     [#(token.Name(_name), _pos), ..] ->
       case parse_assignment(tokens) {
-        Ok(assignment) -> Ok(assignment)
-        Error(error) -> Error(error)
+        Ok(#(new_tokens, assignment)) -> Ok(#(new_tokens, assignment))
+        Error(error) -> {
+          Error(error)
+        }
       }
     [#(token.When, _pos), ..] ->
       case parse_when(tokens) {
-        Ok(when) -> Ok(ast.Expression(ast.When(when)))
-        Error(error) -> Error(error)
+        Ok(#(new_tokens, when)) ->
+          Ok(#(new_tokens, ast.Expression(ast.When(when))))
+        Error(error) -> {
+          Error(error)
+        }
       }
-    [#(unexpected_token, pos), ..] ->
+    [#(unexpected_token, pos), ..] -> {
       Error(UnexpectedToken(unexpected_token, pos))
-    [] -> Error(UnexpectedEndOfInput)
+    }
+    [] -> {
+      Error(UnexpectedEndOfInput)
+    }
   }
 }
 
 fn parse_assignment(
   tokens: List(#(Token, Position)),
-) -> Result(ast.Statement, ParserError) {
+) -> Result(#(List(#(Token, Position)), ast.Statement), ParserError) {
   case tokens {
     [
       #(token.Name(named_id), _pos),
@@ -66,7 +75,10 @@ fn parse_assignment(
       #(token.Period, _pos),
       ..
     ] ->
-      Ok(ast.Assignment(ast.StringType, named_id, ast.StringValue(string_value)))
+      Ok(#(
+        list.drop(tokens, 4),
+        ast.Assignment(ast.StringType, named_id, ast.StringValue(string_value)),
+      ))
     [
       #(token.Name(_named_id), _pos),
       #(unexpected_token, pos),
@@ -81,23 +93,29 @@ fn parse_assignment(
       #(token.Period, _pos),
       ..
     ] -> Error(UnexpectedToken(unexpected_token, pos))
-    _ -> Error(UnexpectedEndOfInput)
+    _ -> {
+      Error(UnexpectedEndOfInput)
+    }
   }
 }
 
-fn parse_when(tokens: List(#(Token, Position))) -> Result(ast.When, ParserError) {
+fn parse_when(
+  tokens: List(#(Token, Position)),
+) -> Result(#(List(#(Token, Position)), ast.When), ParserError) {
   case tokens {
     [#(token.When, _pos), #(token.User, _pos), ..] ->
       parse_when_user(list.drop(tokens, 2))
     [#(token.When, _pos), #(token.TimeKeyword, _pos), ..] ->
       parse_when_time(list.drop(tokens, 2))
-    _ -> Error(UnexpectedEndOfInput)
+    _ -> {
+      Error(UnexpectedEndOfInput)
+    }
   }
 }
 
 fn parse_when_user(
   tokens: List(#(Token, Position)),
-) -> Result(ast.When, ParserError) {
+) -> Result(#(List(#(Token, Position)), ast.When), ParserError) {
   case tokens {
     [
       #(token.Name(username), _pos),
@@ -112,10 +130,13 @@ fn parse_when_user(
       #(token.Period, _pos),
       ..
     ] ->
-      Ok(ast.UserEvent(
-        ast.User(username),
-        ast.Message(Some(matched_message)),
-        ast.Post(message),
+      Ok(#(
+        list.drop(tokens, 10),
+        ast.UserEvent(
+          ast.User(username),
+          ast.Message(Some(matched_message)),
+          ast.Post(message),
+        ),
       ))
     [
       #(token.Name(username), _pos),
@@ -128,14 +149,19 @@ fn parse_when_user(
       #(token.Period, _pos),
       ..
     ] ->
-      Ok(ast.UserEvent(ast.User(username), ast.Message(None), ast.Post(message)))
-    _ -> Error(UnexpectedEndOfInput)
+      Ok(#(
+        list.drop(tokens, 8),
+        ast.UserEvent(ast.User(username), ast.Message(None), ast.Post(message)),
+      ))
+    _ -> {
+      Error(UnexpectedEndOfInput)
+    }
   }
 }
 
 fn parse_when_time(
   tokens: List(#(Token, Position)),
-) -> Result(ast.When, ParserError) {
+) -> Result(#(List(#(Token, Position)), ast.When), ParserError) {
   case tokens {
     [
       #(token.Is, _pos),
@@ -146,7 +172,10 @@ fn parse_when_time(
       #(token.String(message), _pos),
       #(token.Period, _pos),
       ..
-    ] -> Ok(ast.TimeEvent(time_of_day, ast.Post(message)))
-    _ -> Error(UnexpectedEndOfInput)
+    ] ->
+      Ok(#(list.drop(tokens, 7), ast.TimeEvent(time_of_day, ast.Post(message))))
+    _ -> {
+      Error(UnexpectedEndOfInput)
+    }
   }
 }
