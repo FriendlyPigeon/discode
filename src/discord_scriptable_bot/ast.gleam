@@ -42,7 +42,8 @@ pub type User {
 }
 
 pub type UserParams {
-  Message(contents: Option(String))
+  MessageLiteral(contents: Option(String))
+  MessageId(string_id: String)
 }
 
 pub type Entity

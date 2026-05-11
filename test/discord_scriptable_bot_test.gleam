@@ -1,6 +1,7 @@
 import discord_scriptable_bot
 import discord_scriptable_bot/ast
 import discord_scriptable_bot/lexer.{Position}
+import discord_scriptable_bot/parser
 import discord_scriptable_bot/token
 import gleam/option.{None}
 import gleam/time/calendar
@@ -50,7 +51,7 @@ pub fn can_parse_basic_1_test() {
         ast.Expression(
           ast.When(ast.UserEvent(
             ast.User("the_friendly_pigeon"),
-            ast.Message(None),
+            ast.MessageLiteral(None),
             ast.Post("hello world"),
           )),
         ),
@@ -77,6 +78,27 @@ pub fn can_lex_unterminated_string_test() {
   ])
 }
 
+pub fn can_parse_unterminated_string_test() {
+  [
+    #(token.When, Position(0)),
+    #(token.User, Position(5)),
+    #(token.Name("the_friendly_pigeon"), Position(10)),
+    #(token.Post, Position(30)),
+    #(token.Message, Position(35)),
+    #(token.Comma, Position(42)),
+    #(token.Post, Position(44)),
+    #(token.Message, Position(49)),
+    #(token.UnterminatedString("hello world"), Position(57)),
+  ]
+  |> discord_scriptable_bot.parse_program()
+  |> should.equal(
+    Error(parser.UnexpectedToken(
+      token.UnterminatedString("hello world"),
+      Position(57),
+    )),
+  )
+}
+
 pub fn can_lex_string_variable_test() {
   "catch_phrase is \"a catch phrase\".\nwhen user any post message containing catch_phrase, post message \"that is your catch phrase\"."
   |> discord_scriptable_bot.new()
@@ -100,6 +122,46 @@ pub fn can_lex_string_variable_test() {
     #(token.String("that is your catch phrase"), Position(99)),
     #(token.Period, Position(126)),
   ])
+}
+
+pub fn can_parse_string_variable_test() {
+  [
+    #(token.Name("catch_phrase"), Position(0)),
+    #(token.Is, Position(13)),
+    #(token.String("a catch phrase"), Position(16)),
+    #(token.Period, Position(32)),
+    #(token.When, Position(34)),
+    #(token.User, Position(39)),
+    #(token.Any, Position(44)),
+    #(token.Post, Position(48)),
+    #(token.Message, Position(53)),
+    #(token.Containing, Position(61)),
+    #(token.Name("catch_phrase"), Position(72)),
+    #(token.Comma, Position(84)),
+    #(token.Post, Position(86)),
+    #(token.Message, Position(91)),
+    #(token.String("that is your catch phrase"), Position(99)),
+    #(token.Period, Position(126)),
+  ]
+  |> discord_scriptable_bot.parse_program()
+  |> should.equal(
+    Ok(
+      ast.Program([
+        ast.Assignment(
+          ast.StringType,
+          "catch_phrase",
+          ast.StringValue("a catch phrase"),
+        ),
+        ast.Expression(
+          ast.When(ast.UserEvent(
+            ast.User(""),
+            ast.MessageId("catch_phrase"),
+            ast.Post("that is your catch phrase"),
+          )),
+        ),
+      ]),
+    ),
+  )
 }
 
 pub fn can_lex_time_program_test() {

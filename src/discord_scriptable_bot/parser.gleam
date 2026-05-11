@@ -74,11 +74,12 @@ fn parse_assignment(
       #(token.String(string_value), _pos),
       #(token.Period, _pos),
       ..
-    ] ->
+    ] -> {
       Ok(#(
         list.drop(tokens, 4),
         ast.Assignment(ast.StringType, named_id, ast.StringValue(string_value)),
       ))
+    }
     [
       #(token.Name(_named_id), _pos),
       #(unexpected_token, pos),
@@ -134,9 +135,68 @@ fn parse_when_user(
         list.drop(tokens, 10),
         ast.UserEvent(
           ast.User(username),
-          ast.Message(Some(matched_message)),
+          ast.MessageLiteral(Some(matched_message)),
           ast.Post(message),
         ),
+      ))
+    [
+      #(token.Name(username), _pos),
+      #(token.Post, _pos),
+      #(token.Message, _pos),
+      #(token.Containing, _pos),
+      #(token.Name(string_id), _pos),
+      #(token.Comma, _pos),
+      #(token.Post, _pos),
+      #(token.Message, _pos),
+      #(token.String(message), _pos),
+      #(token.Period, _pos),
+      ..
+    ] ->
+      Ok(#(
+        list.drop(tokens, 10),
+        ast.UserEvent(
+          ast.User(username),
+          ast.MessageId(string_id),
+          ast.Post(message),
+        ),
+      ))
+    [
+      #(token.Any, _pos),
+      #(token.Post, _pos),
+      #(token.Message, _pos),
+      #(token.Containing, _pos),
+      #(token.String(matched_message), _pos),
+      #(token.Comma, _pos),
+      #(token.Post, _pos),
+      #(token.Message, _pos),
+      #(token.String(message), _pos),
+      #(token.Period, _pos),
+      ..
+    ] ->
+      Ok(#(
+        list.drop(tokens, 10),
+        ast.UserEvent(
+          ast.User(""),
+          ast.MessageLiteral(Some(matched_message)),
+          ast.Post(message),
+        ),
+      ))
+    [
+      #(token.Any, _pos),
+      #(token.Post, _pos),
+      #(token.Message, _pos),
+      #(token.Containing, _pos),
+      #(token.Name(string_id), _pos),
+      #(token.Comma, _pos),
+      #(token.Post, _pos),
+      #(token.Message, _pos),
+      #(token.String(message), _pos),
+      #(token.Period, _pos),
+      ..
+    ] ->
+      Ok(#(
+        list.drop(tokens, 10),
+        ast.UserEvent(ast.User(""), ast.MessageId(string_id), ast.Post(message)),
       ))
     [
       #(token.Name(username), _pos),
@@ -151,7 +211,11 @@ fn parse_when_user(
     ] ->
       Ok(#(
         list.drop(tokens, 8),
-        ast.UserEvent(ast.User(username), ast.Message(None), ast.Post(message)),
+        ast.UserEvent(
+          ast.User(username),
+          ast.MessageLiteral(None),
+          ast.Post(message),
+        ),
       ))
     _ -> {
       Error(UnexpectedEndOfInput)
