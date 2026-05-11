@@ -181,3 +181,30 @@ pub fn can_lex_time_program_test() {
     #(token.Period, Position(52)),
   ])
 }
+
+pub fn can_parse_time_program_test() {
+  [
+    #(token.When, Position(0)),
+    #(token.TimeKeyword, Position(5)),
+    #(token.Is, Position(10)),
+    #(token.Time(calendar.TimeOfDay(15, 30, 0, 0)), Position(13)),
+    #(token.Comma, Position(18)),
+    #(token.Post, Position(20)),
+    #(token.Message, Position(25)),
+    #(token.String("it is 3:30 PM UTC"), Position(33)),
+    #(token.Period, Position(52)),
+  ]
+  |> discord_scriptable_bot.parse_program()
+  |> should.equal(
+    Ok(
+      ast.Program([
+        ast.Expression(
+          ast.When(ast.TimeEvent(
+            time: calendar.TimeOfDay(15, 30, 0, 0),
+            post: ast.Post("it is 3:30 PM UTC"),
+          )),
+        ),
+      ]),
+    ),
+  )
+}
