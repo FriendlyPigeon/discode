@@ -1,11 +1,19 @@
+import discord_gleam
+import discord_gleam/discord/intents
+import discord_gleam/event_handler
 import discord_scriptable_bot/ast
 import discord_scriptable_bot/lexer.{type Lexer, type Position}
 import discord_scriptable_bot/parser
 import discord_scriptable_bot/token.{type Token}
+import envoy
+import gleam/erlang/process
 import gleam/int
 import gleam/io
 import gleam/list
 import gleam/option.{type Option, None, Some}
+import gleam/otp/static_supervisor as supervisor
+import gleam/otp/supervision
+import logging
 import splitter
 
 // public lexing functions
@@ -97,5 +105,59 @@ pub fn parse_program(
         }
       }
     }
+  }
+}
+
+// discord bot
+
+pub fn main() {
+  logging.configure()
+  logging.set_level(logging.Debug)
+
+  let discord_client_id = case envoy.get("DISCORD_CLIENT_ID") {
+    Ok(id) -> id
+    Error(Nil) ->
+      panic as "The environment variable DISCORD_CLIENT_ID must be set"
+  }
+
+  let discord_token = case envoy.get("DISCORD_TOKEN") {
+    Ok(token) -> token
+    Error(Nil) -> panic as "The environment variable DISCORD_TOKEN must be set"
+  }
+
+  let bot =
+    discord_gleam.bot(discord_token, discord_client_id, intents.default())
+
+  let bot =
+    supervision.worker(fn() {
+      discord_gleam.simple(bot, [simple_handler])
+      |> discord_gleam.start()
+    })
+
+  let assert Ok(_) =
+    supervisor.new(supervisor.OneForOne)
+    |> supervisor.add(bot)
+    |> supervisor.start()
+
+  process.sleep_forever()
+}
+
+fn simple_handler(bot, packet: event_handler.Packet) {
+  case packet {
+    event_handler.MessagePacket(message) -> {
+      logging.log(logging.Info, "Got message: " <> message.d.content)
+
+      case message.d.content {
+        "!ping" -> {
+          discord_gleam.send_message(bot, message.d.channel_id, "Pong!", [])
+
+          Nil
+        }
+
+        _ -> Nil
+      }
+    }
+
+    _ -> Nil
   }
 }
