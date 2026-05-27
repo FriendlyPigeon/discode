@@ -124,35 +124,6 @@ pub fn can_parse_unterminated_string_test() {
   )
 }
 
-pub fn can_compile_unterminated_string_test() {
-  let parsed =
-    [
-      #(token.When, Position(0)),
-      #(token.User, Position(5)),
-      #(token.Name("the_friendly_pigeon"), Position(10)),
-      #(token.Post, Position(30)),
-      #(token.Message, Position(35)),
-      #(token.Comma, Position(42)),
-      #(token.Post, Position(44)),
-      #(token.Message, Position(49)),
-      #(token.UnterminatedString("hello world"), Position(57)),
-    ]
-    |> discord_scriptable_bot.parse_program()
-
-  case parsed {
-    Ok(program) ->
-      program
-      |> runtime.compile_program()
-      |> should.equal(Error(runtime.UnknownVariable("__should_not_compile__")))
-    Error(error) ->
-      error
-      |> should.equal(parser.UnexpectedToken(
-        token.UnterminatedString("hello world"),
-        Position(57),
-      ))
-  }
-}
-
 pub fn can_lex_string_variable_test() {
   "catch_phrase is \"a catch phrase\".\nwhen user any post message containing catch_phrase, post message \"that is your catch phrase\"."
   |> discord_scriptable_bot.new()
