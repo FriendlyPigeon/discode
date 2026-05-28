@@ -1,9 +1,12 @@
 import discord_gleam
 import discord_gleam/discord/intents
 import discord_gleam/event_handler
+import discord_gleam/types/user
+import discord_gleam/ws/packets/message
 import discord_scriptable_bot/ast
-import discord_scriptable_bot/lexer.{type Lexer, type Position}
+import discord_scriptable_bot/lexer
 import discord_scriptable_bot/parser
+import discord_scriptable_bot/runtime
 import discord_scriptable_bot/token.{type Token}
 import envoy
 import gleam/erlang/process
@@ -13,12 +16,13 @@ import gleam/list
 import gleam/option.{type Option, None, Some}
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
+import gleam/string
 import logging
 import splitter
 
 // public lexing functions
 
-pub fn new(source: String) -> Lexer {
+pub fn new(source: String) -> lexer.Lexer {
   lexer.Lexer(
     original_source: source,
     source:,
@@ -29,22 +33,22 @@ pub fn new(source: String) -> Lexer {
   )
 }
 
-pub fn discard_whitespace(lexer: Lexer) -> Lexer {
+pub fn discard_whitespace(lexer: lexer.Lexer) -> lexer.Lexer {
   lexer.Lexer(..lexer, preserve_whitespace: False)
 }
 
-pub fn discard_comments(lexer: Lexer) -> Lexer {
+pub fn discard_comments(lexer: lexer.Lexer) -> lexer.Lexer {
   lexer.Lexer(..lexer, preserve_comments: False)
 }
 
-pub fn lex(lexer: Lexer) -> List(#(Token, Position)) {
+pub fn lex(lexer: lexer.Lexer) -> List(#(Token, lexer.Position)) {
   lexer.do_lex(lexer, [])
   |> list.reverse
 }
 
 fn first_invalid_token(
-  tokens: List(#(Token, Position)),
-) -> Option(#(Token, Position)) {
+  tokens: List(#(Token, lexer.Position)),
+) -> Option(#(Token, lexer.Position)) {
   let found_token =
     list.find(tokens, fn(curr_token) {
       case curr_token {
@@ -62,7 +66,7 @@ fn first_invalid_token(
 // public parsing functions
 
 pub fn parse_program(
-  tokens: List(#(Token, Position)),
+  tokens: List(#(Token, lexer.Position)),
 ) -> Result(ast.Program, parser.ParserError) {
   case tokens {
     [] -> Error(parser.UnexpectedEndOfInput)
@@ -130,7 +134,7 @@ pub fn main() {
 
   let bot =
     supervision.worker(fn() {
-      discord_gleam.simple(bot, [simple_handler])
+      discord_gleam.new(bot, runtime_on_init, runtime_handler)
       |> discord_gleam.start()
     })
 
@@ -142,22 +146,276 @@ pub fn main() {
   process.sleep_forever()
 }
 
-fn simple_handler(bot, packet: event_handler.Packet) {
-  case packet {
-    event_handler.MessagePacket(message) -> {
-      logging.log(logging.Info, "Got message: " <> message.d.content)
+pub type RuntimeState {
+  RuntimeState(runtime: runtime.BotRuntime, sources: List(String))
+}
 
-      case message.d.content {
-        "!ping" -> {
-          discord_gleam.send_message(bot, message.d.channel_id, "Pong!", [])
+pub type LoadError {
+  ParseError(parser.ParserError)
+  CompileError(runtime.CompileError)
+}
 
-          Nil
-        }
+type Command {
+  LoadProgram(source: String)
+  ReloadPrograms
+}
 
-        _ -> Nil
+fn runtime_on_init(
+  selector: process.Selector(Nil),
+) -> #(RuntimeState, process.Selector(Nil)) {
+  let state = RuntimeState(runtime: runtime.empty_runtime(), sources: [])
+  #(state, selector)
+}
+
+fn runtime_handler(
+  bot,
+  state: RuntimeState,
+  msg: discord_gleam.HandlerMessage(Nil),
+) -> discord_gleam.Next(RuntimeState, Nil) {
+  case msg {
+    discord_gleam.Packet(packet) ->
+      case packet {
+        event_handler.MessagePacket(message) ->
+          handle_message(bot, state, message)
+        _ -> discord_gleam.continue(state)
       }
-    }
+    discord_gleam.User(_msg) -> discord_gleam.continue(state)
+  }
+}
 
-    _ -> Nil
+fn handle_message(
+  bot,
+  state: RuntimeState,
+  message: message.MessagePacket,
+) -> discord_gleam.Next(RuntimeState, Nil) {
+  let content = message.d.content
+
+  case parse_command(content) {
+    Some(command) -> handle_command(bot, state, message.d.channel_id, command)
+    None ->
+      handle_runtime_rules(
+        bot,
+        state,
+        message.d.author,
+        message.d.channel_id,
+        content,
+      )
+  }
+}
+
+fn handle_runtime_rules(
+  bot,
+  state: RuntimeState,
+  author: user.User,
+  channel_id: String,
+  content: String,
+) -> discord_gleam.Next(RuntimeState, Nil) {
+  let RuntimeState(runtime: runtime_state, sources: _) = state
+
+  let author_username = case author {
+    user.PartialUser(username: username, ..) -> username
+    user.FullUser(username: username, ..) -> username
+  }
+
+  runtime.match_message(runtime_state, author_username, content)
+  |> list.each(fn(response) {
+    let _ = discord_gleam.send_message(bot, channel_id, response, [])
+    Nil
+  })
+
+  discord_gleam.continue(state)
+}
+
+fn parse_command(content: String) -> Option(Command) {
+  case content {
+    "!reload" -> Some(ReloadPrograms)
+    _ ->
+      case string.starts_with(content, "!load ") {
+        True -> Some(LoadProgram(string.drop_start(content, 6)))
+        False -> None
+      }
+  }
+}
+
+fn handle_command(
+  bot,
+  state: RuntimeState,
+  channel_id: String,
+  command: Command,
+) -> discord_gleam.Next(RuntimeState, Nil) {
+  case command {
+    LoadProgram(source) ->
+      case string.is_empty(source) {
+        True -> {
+          let _ =
+            discord_gleam.send_message(
+              bot,
+              channel_id,
+              "Usage: !load <script>",
+              [],
+            )
+          discord_gleam.continue(state)
+        }
+        False ->
+          case load_program(state, source) {
+            Ok(next_state) -> {
+              let RuntimeState(runtime: _, sources: sources) = next_state
+              let _ =
+                discord_gleam.send_message(
+                  bot,
+                  channel_id,
+                  "Loaded program. Total programs: "
+                    <> int.to_string(list.length(sources)),
+                  [],
+                )
+              discord_gleam.continue(next_state)
+            }
+            Error(error) -> {
+              let _ =
+                discord_gleam.send_message(
+                  bot,
+                  channel_id,
+                  "Failed to load program: " <> load_error_to_string(error),
+                  [],
+                )
+              discord_gleam.continue(state)
+            }
+          }
+      }
+
+    ReloadPrograms ->
+      case reload_programs(state) {
+        Ok(next_state) -> {
+          let RuntimeState(runtime: _, sources: sources) = next_state
+          let _ =
+            discord_gleam.send_message(
+              bot,
+              channel_id,
+              "Reloaded programs. Total programs: "
+                <> int.to_string(list.length(sources)),
+              [],
+            )
+          discord_gleam.continue(next_state)
+        }
+        Error(error) -> {
+          let _ =
+            discord_gleam.send_message(
+              bot,
+              channel_id,
+              "Failed to reload programs: " <> load_error_to_string(error),
+              [],
+            )
+          discord_gleam.continue(state)
+        }
+      }
+  }
+}
+
+fn load_program(
+  state: RuntimeState,
+  source: String,
+) -> Result(RuntimeState, LoadError) {
+  let RuntimeState(runtime: runtime_state, sources: sources) = state
+
+  case compile_source(source) {
+    Ok(program) ->
+      Ok(RuntimeState(
+        runtime: runtime.add_program(runtime_state, program),
+        sources: list.append(sources, [source]),
+      ))
+    Error(error) -> Error(error)
+  }
+}
+
+fn reload_programs(state: RuntimeState) -> Result(RuntimeState, LoadError) {
+  let RuntimeState(runtime: _, sources: sources) = state
+
+  case compile_sources(sources) {
+    Ok(programs) ->
+      Ok(RuntimeState(
+        runtime: runtime.runtime_from_programs(programs),
+        sources: sources,
+      ))
+    Error(error) -> Error(error)
+  }
+}
+
+fn compile_sources(
+  sources: List(String),
+) -> Result(List(runtime.BotProgram), LoadError) {
+  case sources {
+    [] -> Ok([])
+    [source, ..rest] ->
+      case compile_source(source) {
+        Ok(program) ->
+          case compile_sources(rest) {
+            Ok(programs) -> Ok([program, ..programs])
+            Error(error) -> Error(error)
+          }
+        Error(error) -> Error(error)
+      }
+  }
+}
+
+fn compile_source(source: String) -> Result(runtime.BotProgram, LoadError) {
+  let tokens =
+    source
+    |> new()
+    |> discard_whitespace()
+    |> lex()
+
+  case parse_program(tokens) {
+    Ok(program) ->
+      case runtime.compile_program(program) {
+        Ok(bot_program) -> Ok(bot_program)
+        Error(error) -> Error(CompileError(error))
+      }
+    Error(error) -> Error(ParseError(error))
+  }
+}
+
+fn load_error_to_string(error: LoadError) -> String {
+  case error {
+    ParseError(parse_error) -> parser_error_to_string(parse_error)
+    CompileError(compile_error) -> compile_error_to_string(compile_error)
+  }
+}
+
+fn parser_error_to_string(error: parser.ParserError) -> String {
+  case error {
+    parser.UnexpectedEndOfInput -> "Unexpected end of input"
+    parser.UnexpectedToken(tok, pos) -> {
+      let lexer.Position(byte_offset: offset) = pos
+      "Unexpected token "
+      <> token.to_string(tok)
+      <> " at "
+      <> int.to_string(offset)
+    }
+  }
+}
+
+fn compile_error_to_string(error: runtime.CompileError) -> String {
+  case error {
+    runtime.UnknownVariable(name) -> "Unknown variable: " <> name
+    runtime.ExpectedStringVariable(name) -> "Expected string variable: " <> name
+    runtime.InvalidAssignment(assignment_type, value) ->
+      "Invalid assignment: "
+      <> assignment_type_to_string(assignment_type)
+      <> " = "
+      <> assignment_value_to_string(value)
+  }
+}
+
+fn assignment_type_to_string(assignment_type: ast.AssignmentType) -> String {
+  case assignment_type {
+    ast.StringType -> "string"
+    ast.IntType -> "int"
+  }
+}
+
+fn assignment_value_to_string(value: ast.AssignmentValue) -> String {
+  case value {
+    ast.StringValue(string_value) -> "\"" <> string_value <> "\""
+    ast.IntValue(int_value) -> int.to_string(int_value)
   }
 }

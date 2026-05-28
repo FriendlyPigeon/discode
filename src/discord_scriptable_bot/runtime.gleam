@@ -1,10 +1,15 @@
 import discord_scriptable_bot/ast
 import gleam/list
-import gleam/option.{type Option, Some}
+import gleam/option.{type Option, None, Some}
+import gleam/string
 import gleam/time/calendar
 
 pub type BotProgram {
   BotProgram(env: Environment, rules: List(Rule))
+}
+
+pub type BotRuntime {
+  BotRuntime(programs: List(BotProgram), rules: List(Rule))
 }
 
 pub type Environment =
@@ -40,6 +45,99 @@ pub fn compile_program(program: ast.Program) -> Result(BotProgram, CompileError)
   case compile_statements(statements, [], []) {
     Ok(#(env, rules)) -> Ok(BotProgram(env: env, rules: list.reverse(rules)))
     Error(error) -> Error(error)
+  }
+}
+
+pub fn empty_runtime() -> BotRuntime {
+  BotRuntime(programs: [], rules: [])
+}
+
+pub fn runtime_from_programs(programs: List(BotProgram)) -> BotRuntime {
+  BotRuntime(programs: programs, rules: collect_rules(programs))
+}
+
+pub fn add_program(runtime: BotRuntime, program: BotProgram) -> BotRuntime {
+  let BotRuntime(programs, rules) = runtime
+  let BotProgram(env: _, rules: program_rules) = program
+
+  BotRuntime(
+    programs: list.append(programs, [program]),
+    rules: list.append(rules, program_rules),
+  )
+}
+
+pub fn add_programs(
+  runtime: BotRuntime,
+  programs: List(BotProgram),
+) -> BotRuntime {
+  let BotRuntime(existing_programs, rules) = runtime
+  let new_rules = collect_rules(programs)
+
+  BotRuntime(
+    programs: list.append(existing_programs, programs),
+    rules: list.append(rules, new_rules),
+  )
+}
+
+pub fn match_message(
+  runtime: BotRuntime,
+  author_username: String,
+  content: String,
+) -> List(String) {
+  let BotRuntime(programs: _, rules: rules) = runtime
+
+  list.fold(rules, [], fn(acc, rule) {
+    case rule {
+      UserMessageRule(user: user, contains: contains, post: post) ->
+        case
+          user_matches(user, author_username)
+          && message_matches(contains, content)
+        {
+          True -> [post, ..acc]
+          False -> acc
+        }
+      _ -> acc
+    }
+  })
+  |> list.reverse
+}
+
+pub fn match_time(runtime: BotRuntime, time: calendar.TimeOfDay) -> List(String) {
+  let BotRuntime(programs: _, rules: rules) = runtime
+
+  list.fold(rules, [], fn(acc, rule) {
+    case rule {
+      TimeRule(time: rule_time, post: post) ->
+        case rule_time == time {
+          True -> [post, ..acc]
+          False -> acc
+        }
+      _ -> acc
+    }
+  })
+  |> list.reverse
+}
+
+fn collect_rules(programs: List(BotProgram)) -> List(Rule) {
+  list.fold(programs, [], fn(acc, program) {
+    let BotProgram(env: _, rules: program_rules) = program
+
+    list.fold(program_rules, acc, fn(acc_inner, rule) { [rule, ..acc_inner] })
+  })
+  |> list.reverse
+}
+
+fn user_matches(selector: UserSelector, author_username: String) -> Bool {
+  case selector {
+    AnyUser -> True
+    Username(name) -> name == author_username
+  }
+}
+
+fn message_matches(contains: Option(String), content: String) -> Bool {
+  case contains {
+    None -> True
+    Some(substring) -> string.contains(content, substring)
   }
 }
 
