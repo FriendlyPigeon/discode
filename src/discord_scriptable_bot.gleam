@@ -17,6 +17,8 @@ import gleam/option.{type Option, None, Some}
 import gleam/otp/static_supervisor as supervisor
 import gleam/otp/supervision
 import gleam/string
+import gleam/time/calendar
+import gleam/time/timestamp
 import logging
 import splitter
 
@@ -146,8 +148,12 @@ pub fn main() {
   process.sleep_forever()
 }
 
+pub type LoadedSource {
+  LoadedSource(channel_id: String, source: String)
+}
+
 pub type RuntimeState {
-  RuntimeState(runtime: runtime.BotRuntime, sources: List(String))
+  RuntimeState(runtime: runtime.BotRuntime, sources: List(LoadedSource))
 }
 
 pub type LoadError {
@@ -160,9 +166,16 @@ type Command {
   ReloadPrograms
 }
 
+type RuntimeMessage {
+  TimeTick
+}
+
 fn runtime_on_init(
-  selector: process.Selector(Nil),
-) -> #(RuntimeState, process.Selector(Nil)) {
+  selector: process.Selector(RuntimeMessage),
+) -> #(RuntimeState, process.Selector(RuntimeMessage)) {
+  let tick_subject = process.new_subject()
+  let selector = process.select(selector, tick_subject)
+  let _ = process.spawn(fn() { time_loop(tick_subject) })
   let state = RuntimeState(runtime: runtime.empty_runtime(), sources: [])
   #(state, selector)
 }
@@ -170,8 +183,8 @@ fn runtime_on_init(
 fn runtime_handler(
   bot,
   state: RuntimeState,
-  msg: discord_gleam.HandlerMessage(Nil),
-) -> discord_gleam.Next(RuntimeState, Nil) {
+  msg: discord_gleam.HandlerMessage(RuntimeMessage),
+) -> discord_gleam.Next(RuntimeState, RuntimeMessage) {
   case msg {
     discord_gleam.Packet(packet) ->
       case packet {
@@ -179,7 +192,7 @@ fn runtime_handler(
           handle_message(bot, state, message)
         _ -> discord_gleam.continue(state)
       }
-    discord_gleam.User(_msg) -> discord_gleam.continue(state)
+    discord_gleam.User(TimeTick) -> handle_time_tick(bot, state)
   }
 }
 
@@ -187,7 +200,7 @@ fn handle_message(
   bot,
   state: RuntimeState,
   message: message.MessagePacket,
-) -> discord_gleam.Next(RuntimeState, Nil) {
+) -> discord_gleam.Next(RuntimeState, RuntimeMessage) {
   let content = message.d.content
 
   case parse_command(content) {
@@ -209,7 +222,7 @@ fn handle_runtime_rules(
   author: user.User,
   channel_id: String,
   content: String,
-) -> discord_gleam.Next(RuntimeState, Nil) {
+) -> discord_gleam.Next(RuntimeState, RuntimeMessage) {
   let RuntimeState(runtime: runtime_state, sources: _) = state
 
   let author_username = case author {
@@ -224,6 +237,62 @@ fn handle_runtime_rules(
   })
 
   discord_gleam.continue(state)
+}
+
+fn handle_time_tick(
+  bot,
+  state: RuntimeState,
+) -> discord_gleam.Next(RuntimeState, RuntimeMessage) {
+  let RuntimeState(runtime: runtime_state, sources: _) = state
+  let time = current_time_of_day()
+
+  runtime.match_time(runtime_state, time)
+  |> list.each(fn(time_post) {
+    let runtime.TimePost(channel_id: channel_id, post: post) = time_post
+    let _ = discord_gleam.send_message(bot, channel_id, post, [])
+    Nil
+  })
+
+  discord_gleam.continue(state)
+}
+
+fn time_loop(subject: process.Subject(RuntimeMessage)) -> Nil {
+  let delay = milliseconds_until_next_minute()
+  process.sleep(delay)
+  process.send(subject, TimeTick)
+  time_loop(subject)
+}
+
+fn milliseconds_until_next_minute() -> Int {
+  let now = timestamp.system_time()
+  let #(_date, time) = timestamp.to_calendar(now, calendar.utc_offset)
+  let calendar.TimeOfDay(
+    hours: _,
+    minutes: _,
+    seconds: seconds,
+    nanoseconds: nanoseconds,
+  ) = time
+
+  let assert Ok(nanoseconds_ms) = int.divide(nanoseconds, 1_000_000)
+  let ms_into_minute = seconds * 1000 + nanoseconds_ms
+
+  case ms_into_minute {
+    0 -> 0
+    _ -> 60_000 - ms_into_minute
+  }
+}
+
+fn current_time_of_day() -> calendar.TimeOfDay {
+  let now = timestamp.system_time()
+  let #(_date, time) = timestamp.to_calendar(now, calendar.utc_offset)
+  let calendar.TimeOfDay(
+    hours: hours,
+    minutes: minutes,
+    seconds: _,
+    nanoseconds: _,
+  ) = time
+
+  calendar.TimeOfDay(hours, minutes, 0, 0)
 }
 
 fn parse_command(content: String) -> Option(Command) {
@@ -242,7 +311,7 @@ fn handle_command(
   state: RuntimeState,
   channel_id: String,
   command: Command,
-) -> discord_gleam.Next(RuntimeState, Nil) {
+) -> discord_gleam.Next(RuntimeState, RuntimeMessage) {
   case command {
     LoadProgram(source) ->
       case string.is_empty(source) {
@@ -257,7 +326,7 @@ fn handle_command(
           discord_gleam.continue(state)
         }
         False ->
-          case load_program(state, source) {
+          case load_program(state, channel_id, source) {
             Ok(next_state) -> {
               let RuntimeState(runtime: _, sources: sources) = next_state
               let _ =
@@ -313,6 +382,7 @@ fn handle_command(
 
 fn load_program(
   state: RuntimeState,
+  channel_id: String,
   source: String,
 ) -> Result(RuntimeState, LoadError) {
   let RuntimeState(runtime: runtime_state, sources: sources) = state
@@ -320,8 +390,12 @@ fn load_program(
   case compile_source(source) {
     Ok(program) ->
       Ok(RuntimeState(
-        runtime: runtime.add_program(runtime_state, program),
-        sources: list.append(sources, [source]),
+        runtime: runtime.add_program_with_channel(
+          runtime_state,
+          program,
+          channel_id,
+        ),
+        sources: list.append(sources, [LoadedSource(channel_id, source)]),
       ))
     Error(error) -> Error(error)
   }
@@ -333,7 +407,7 @@ fn reload_programs(state: RuntimeState) -> Result(RuntimeState, LoadError) {
   case compile_sources(sources) {
     Ok(programs) ->
       Ok(RuntimeState(
-        runtime: runtime.runtime_from_programs(programs),
+        runtime: runtime.runtime_from_programs_with_channels(programs),
         sources: sources,
       ))
     Error(error) -> Error(error)
@@ -341,15 +415,22 @@ fn reload_programs(state: RuntimeState) -> Result(RuntimeState, LoadError) {
 }
 
 fn compile_sources(
-  sources: List(String),
-) -> Result(List(runtime.BotProgram), LoadError) {
+  sources: List(LoadedSource),
+) -> Result(List(runtime.ProgramWithChannel), LoadError) {
   case sources {
     [] -> Ok([])
-    [source, ..rest] ->
+    [LoadedSource(channel_id: channel_id, source: source), ..rest] ->
       case compile_source(source) {
         Ok(program) ->
           case compile_sources(rest) {
-            Ok(programs) -> Ok([program, ..programs])
+            Ok(programs) ->
+              Ok([
+                runtime.ProgramWithChannel(
+                  program: program,
+                  channel_id: channel_id,
+                ),
+                ..programs
+              ])
             Error(error) -> Error(error)
           }
         Error(error) -> Error(error)

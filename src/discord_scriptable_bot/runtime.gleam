@@ -8,8 +8,28 @@ pub type BotProgram {
   BotProgram(env: Environment, rules: List(Rule))
 }
 
+pub type ProgramWithChannel {
+  ProgramWithChannel(program: BotProgram, channel_id: String)
+}
+
+pub type TimeRuleWithChannel {
+  TimeRuleWithChannel(
+    time: calendar.TimeOfDay,
+    post: String,
+    channel_id: String,
+  )
+}
+
+pub type TimePost {
+  TimePost(channel_id: String, post: String)
+}
+
 pub type BotRuntime {
-  BotRuntime(programs: List(BotProgram), rules: List(Rule))
+  BotRuntime(
+    programs: List(BotProgram),
+    rules: List(Rule),
+    time_rules: List(TimeRuleWithChannel),
+  )
 }
 
 pub type Environment =
@@ -49,20 +69,53 @@ pub fn compile_program(program: ast.Program) -> Result(BotProgram, CompileError)
 }
 
 pub fn empty_runtime() -> BotRuntime {
-  BotRuntime(programs: [], rules: [])
+  BotRuntime(programs: [], rules: [], time_rules: [])
 }
 
 pub fn runtime_from_programs(programs: List(BotProgram)) -> BotRuntime {
-  BotRuntime(programs: programs, rules: collect_rules(programs))
+  BotRuntime(
+    programs: programs,
+    rules: collect_user_rules(programs),
+    time_rules: [],
+  )
+}
+
+pub fn runtime_from_programs_with_channels(
+  programs: List(ProgramWithChannel),
+) -> BotRuntime {
+  BotRuntime(
+    programs: programs_from_with_channels(programs),
+    rules: collect_user_rules_from_with_channels(programs),
+    time_rules: collect_time_rules(programs),
+  )
 }
 
 pub fn add_program(runtime: BotRuntime, program: BotProgram) -> BotRuntime {
-  let BotRuntime(programs, rules) = runtime
+  let BotRuntime(programs, rules, time_rules) = runtime
   let BotProgram(env: _, rules: program_rules) = program
 
   BotRuntime(
     programs: list.append(programs, [program]),
-    rules: list.append(rules, program_rules),
+    rules: list.append(rules, user_rules_from_rules(program_rules)),
+    time_rules: time_rules,
+  )
+}
+
+pub fn add_program_with_channel(
+  runtime: BotRuntime,
+  program: BotProgram,
+  channel_id: String,
+) -> BotRuntime {
+  let BotRuntime(programs, rules, time_rules) = runtime
+  let BotProgram(env: _, rules: program_rules) = program
+
+  BotRuntime(
+    programs: list.append(programs, [program]),
+    rules: list.append(rules, user_rules_from_rules(program_rules)),
+    time_rules: list.append(
+      time_rules,
+      time_rules_from_rules(program_rules, channel_id),
+    ),
   )
 }
 
@@ -70,12 +123,27 @@ pub fn add_programs(
   runtime: BotRuntime,
   programs: List(BotProgram),
 ) -> BotRuntime {
-  let BotRuntime(existing_programs, rules) = runtime
-  let new_rules = collect_rules(programs)
+  let BotRuntime(existing_programs, rules, time_rules) = runtime
+  let new_rules = collect_user_rules(programs)
 
   BotRuntime(
     programs: list.append(existing_programs, programs),
     rules: list.append(rules, new_rules),
+    time_rules: time_rules,
+  )
+}
+
+pub fn add_programs_with_channels(
+  runtime: BotRuntime,
+  programs: List(ProgramWithChannel),
+) -> BotRuntime {
+  let BotRuntime(existing_programs, rules, time_rules) = runtime
+  let new_programs = programs_from_with_channels(programs)
+
+  BotRuntime(
+    programs: list.append(existing_programs, new_programs),
+    rules: list.append(rules, collect_user_rules_from_with_channels(programs)),
+    time_rules: list.append(time_rules, collect_time_rules(programs)),
   )
 }
 
@@ -84,7 +152,7 @@ pub fn match_message(
   author_username: String,
   content: String,
 ) -> List(String) {
-  let BotRuntime(programs: _, rules: rules) = runtime
+  let BotRuntime(programs: _, rules: rules, time_rules: _) = runtime
 
   list.fold(rules, [], fn(acc, rule) {
     case rule {
@@ -102,27 +170,110 @@ pub fn match_message(
   |> list.reverse
 }
 
-pub fn match_time(runtime: BotRuntime, time: calendar.TimeOfDay) -> List(String) {
-  let BotRuntime(programs: _, rules: rules) = runtime
+pub fn match_time(
+  runtime: BotRuntime,
+  time: calendar.TimeOfDay,
+) -> List(TimePost) {
+  let BotRuntime(programs: _, rules: _, time_rules: time_rules) = runtime
 
+  list.fold(time_rules, [], fn(acc, rule) {
+    let TimeRuleWithChannel(time: rule_time, post: post, channel_id: channel_id) =
+      rule
+
+    case rule_time == time {
+      True -> [TimePost(channel_id: channel_id, post: post), ..acc]
+      False -> acc
+    }
+  })
+  |> list.reverse
+}
+
+fn collect_user_rules(programs: List(BotProgram)) -> List(Rule) {
+  list.fold(programs, [], fn(acc, program) {
+    let BotProgram(env: _, rules: program_rules) = program
+
+    list.fold(program_rules, acc, fn(acc_inner, rule) {
+      case rule {
+        UserMessageRule(..) -> [rule, ..acc_inner]
+        _ -> acc_inner
+      }
+    })
+  })
+  |> list.reverse
+}
+
+fn collect_user_rules_from_with_channels(
+  programs: List(ProgramWithChannel),
+) -> List(Rule) {
+  list.fold(programs, [], fn(acc, program_with_channel) {
+    let ProgramWithChannel(program: program, channel_id: _) =
+      program_with_channel
+    let BotProgram(env: _, rules: program_rules) = program
+
+    list.fold(program_rules, acc, fn(acc_inner, rule) {
+      case rule {
+        UserMessageRule(..) -> [rule, ..acc_inner]
+        _ -> acc_inner
+      }
+    })
+  })
+  |> list.reverse
+}
+
+fn collect_time_rules(
+  programs: List(ProgramWithChannel),
+) -> List(TimeRuleWithChannel) {
+  list.fold(programs, [], fn(acc, program_with_channel) {
+    let ProgramWithChannel(program: program, channel_id: channel_id) =
+      program_with_channel
+    let BotProgram(env: _, rules: program_rules) = program
+
+    list.fold(program_rules, acc, fn(acc_inner, rule) {
+      case rule {
+        TimeRule(time: time, post: post) -> [
+          TimeRuleWithChannel(time: time, post: post, channel_id: channel_id),
+          ..acc_inner
+        ]
+        _ -> acc_inner
+      }
+    })
+  })
+  |> list.reverse
+}
+
+fn user_rules_from_rules(rules: List(Rule)) -> List(Rule) {
   list.fold(rules, [], fn(acc, rule) {
     case rule {
-      TimeRule(time: rule_time, post: post) ->
-        case rule_time == time {
-          True -> [post, ..acc]
-          False -> acc
-        }
+      UserMessageRule(..) -> [rule, ..acc]
       _ -> acc
     }
   })
   |> list.reverse
 }
 
-fn collect_rules(programs: List(BotProgram)) -> List(Rule) {
-  list.fold(programs, [], fn(acc, program) {
-    let BotProgram(env: _, rules: program_rules) = program
+fn time_rules_from_rules(
+  rules: List(Rule),
+  channel_id: String,
+) -> List(TimeRuleWithChannel) {
+  list.fold(rules, [], fn(acc, rule) {
+    case rule {
+      TimeRule(time: time, post: post) -> [
+        TimeRuleWithChannel(time: time, post: post, channel_id: channel_id),
+        ..acc
+      ]
+      _ -> acc
+    }
+  })
+  |> list.reverse
+}
 
-    list.fold(program_rules, acc, fn(acc_inner, rule) { [rule, ..acc_inner] })
+fn programs_from_with_channels(
+  programs: List(ProgramWithChannel),
+) -> List(BotProgram) {
+  list.fold(programs, [], fn(acc, program_with_channel) {
+    let ProgramWithChannel(program: program, channel_id: _) =
+      program_with_channel
+    [program, ..acc]
   })
   |> list.reverse
 }
